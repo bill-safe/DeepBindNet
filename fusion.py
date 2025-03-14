@@ -227,10 +227,129 @@ class CrossAttentionFusion(nn.Module):
         
         return output, all_attn_weights
 
+class GatedCrossAttention(nn.Module):
+    """
+    门控跨模态注意力融合模块
+    
+    通过门控机制动态调节原始特征与注意力特征的平衡：
+    - 噪声数据下自动降低注意力权重（g→0）
+    - 强相关特征时提升注意力贡献（g→1）
+    """
+    def __init__(self, embed_dim=256, num_heads=8, ff_dim=1024, num_layers=2, dropout=0.1, protein_dim=None, molecule_dim=None):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        
+        # 特征投影层（如果需要）
+        self.protein_projection = None
+        if protein_dim is not None and protein_dim != embed_dim:
+            self.protein_projection = nn.Linear(protein_dim, embed_dim)
+            
+        self.molecule_projection = None
+        if molecule_dim is not None and molecule_dim != embed_dim:
+            self.molecule_projection = nn.Linear(molecule_dim, embed_dim)
+        
+        # 跨模态注意力层
+        self.cross_attn_layers = nn.ModuleList([
+            TransformerEncoderLayer(embed_dim, num_heads, ff_dim, dropout)
+            for _ in range(num_layers)
+        ])
+        
+        # 门控网络
+        self.gate_net = nn.Sequential(
+            nn.Linear(embed_dim * 2, 1024),
+            nn.ReLU(),
+            nn.BatchNorm1d(1024),
+            nn.Linear(1024, 1),
+            nn.Sigmoid()
+        )
+        
+        # 输出投影
+        self.output_proj = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim),
+            nn.LayerNorm(embed_dim),
+            nn.ReLU()
+        )
+        
+        # 梯度裁剪阈值
+        self.grad_clip_threshold = 2.0
+    
+    def forward(self, protein_features, molecule_features):
+        """
+        前向传播
+        
+        参数:
+        - protein_features: 蛋白质特征，形状为 [batch_size, protein_dim]
+        - molecule_features: 分子特征，形状为 [batch_size, molecule_dim]
+        
+        返回:
+        - 融合特征，形状为 [batch_size, embed_dim]
+        - 注意力权重
+        """
+        batch_size = protein_features.size(0)
+        
+        # 应用特征投影（如果需要）
+        if self.protein_projection is not None:
+            protein_features = self.protein_projection(protein_features)
+        elif protein_features.size(1) != self.embed_dim:
+            protein_projection = nn.Linear(protein_features.size(1), self.embed_dim).to(protein_features.device)
+            protein_features = protein_projection(protein_features)
+            
+        if self.molecule_projection is not None:
+            molecule_features = self.molecule_projection(molecule_features)
+        elif molecule_features.size(1) != self.embed_dim:
+            molecule_projection = nn.Linear(molecule_features.size(1), self.embed_dim).to(molecule_features.device)
+            molecule_features = molecule_projection(molecule_features)
+        
+        # 将特征扩展为序列形式（添加序列长度维度）
+        protein_seq = protein_features.unsqueeze(1)  # [batch_size, 1, embed_dim]
+        molecule_seq = molecule_features.unsqueeze(1)  # [batch_size, 1, embed_dim]
+        
+        # 初始化为蛋白质特征
+        x = protein_seq
+        all_attn_weights = []
+        
+        # 应用跨模态注意力层
+        for layer in self.cross_attn_layers:
+            # 使用蛋白质特征作为Query，分子特征作为Key和Value
+            x, attn_weights = layer(x)
+            all_attn_weights.append(attn_weights)
+        
+        # 提取融合后的特征
+        attn_features = x.squeeze(1)  # [batch_size, embed_dim]
+        
+        # 计算门控系数
+        gate_input = torch.cat([protein_features, molecule_features], dim=1)
+        # 处理批归一化的维度问题
+        g = self.gate_net(gate_input)  # [batch_size, 1]
+        
+        # 门控融合: g * attn_features + (1-g) * protein_features
+        gated_features = g * attn_features + (1 - g) * protein_features
+        
+        # 输出投影
+        output = self.output_proj(gated_features)
+        
+        # 梯度裁剪（在训练时）
+        if self.training:
+            for param in self.parameters():
+                if param.grad is not None:
+                    torch.nn.utils.clip_grad_norm_(param, self.grad_clip_threshold)
+        
+        return output, all_attn_weights
+
 # 使用示例
 if __name__ == "__main__":
     # 创建融合模块
     fusion_module = CrossAttentionFusion(
+        embed_dim=256,
+        num_heads=8,
+        ff_dim=1024,
+        num_layers=2,
+        dropout=0.1
+    )
+    
+    # 创建门控融合模块
+    gated_fusion_module = GatedCrossAttention(
         embed_dim=256,
         num_heads=8,
         ff_dim=1024,
@@ -245,9 +364,11 @@ if __name__ == "__main__":
     
     # 融合特征
     fused_features, attn_weights = fusion_module(protein_features, molecule_features)
+    gated_features, gated_attn_weights = gated_fusion_module(protein_features, molecule_features)
     
     print(f"蛋白质特征形状: {protein_features.shape}")
     print(f"分子特征形状: {molecule_features.shape}")
     print(f"融合特征形状: {fused_features.shape}")
+    print(f"门控融合特征形状: {gated_features.shape}")
     print(f"注意力权重数量: {len(attn_weights)}")
     print(f"第一层注意力权重形状: {attn_weights[0].shape}")

@@ -12,11 +12,11 @@ from sklearn.metrics import mean_squared_error, r2_score
 import pickle
 
 from dataset import get_data_loaders
-from model import DeepBindNet
+from model_gated import DeepBindNetGated  # 导入门控版本的模型
 
 def parse_args():
     """解析命令行参数"""
-    parser = argparse.ArgumentParser(description='DeepBindNet训练脚本')
+    parser = argparse.ArgumentParser(description='DeepBindNet门控版本训练脚本')
     
     # 数据参数
     parser.add_argument('--data_dir', type=str, default='data/processed',
@@ -53,7 +53,7 @@ def parse_args():
     # 其他参数
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu',
                         help='训练设备')
-    parser.add_argument('--output_dir', type=str, default='outputs',
+    parser.add_argument('--output_dir', type=str, default='outputs_gated',  # 默认输出到不同目录
                         help='输出目录')
     parser.add_argument('--log_interval', type=int, default=10,
                         help='日志打印间隔（批次）')
@@ -276,6 +276,7 @@ def main():
     # 设置设备
     device = torch.device(args.device)
     print(f'使用设备: {device}')
+    print(f'使用门控跨模态注意力机制')
     
     # 设置TensorBoard
     writer = SummaryWriter(log_dir=os.path.join(args.output_dir, 'logs'))
@@ -301,8 +302,8 @@ def main():
         num_workers=args.num_workers
     )
     
-    # 创建模型
-    model = DeepBindNet(
+    # 创建门控版本的模型
+    model = DeepBindNetGated(
         atom_feature_dim=6,
         bond_feature_dim=3,
         hidden_dim=args.hidden_dim,

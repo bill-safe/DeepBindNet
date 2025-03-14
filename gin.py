@@ -85,7 +85,7 @@ class GIN(torch.nn.Module):
     """
     图神经网络模块，包含：
     - 节点/边特征嵌入层
-    - 5层GIN卷积，每层后接Dropout
+    - 8层GIN卷积，每层后接Dropout
     - 全局池化层（输出256维特征）
     - 输出层
     """
@@ -94,20 +94,20 @@ class GIN(torch.nn.Module):
         # 节点特征嵌入层
         self.node_embedding = torch.nn.Sequential(
             torch.nn.Linear(atom_feature_dim, hidden_dim),
-            torch.nn.LayerNorm(hidden_dim),  # 替换为LayerNorm
+            torch.nn.LayerNorm(hidden_dim),
             torch.nn.ReLU()
         )
         
         # 边特征嵌入层
         self.edge_embedding = torch.nn.Sequential(
             torch.nn.Linear(bond_feature_dim, hidden_dim),
-            torch.nn.LayerNorm(hidden_dim),  # 替换为LayerNorm
+            torch.nn.LayerNorm(hidden_dim),
             torch.nn.ReLU()
         )
         
-        # 5层GIN卷积
+        # 8层GIN卷积（增加层数）
         self.gin_layers = torch.nn.ModuleList([
-            GINLayer(hidden_dim, hidden_dim) for _ in range(5)
+            GINLayer(hidden_dim, hidden_dim) for _ in range(8)
         ])
         
         # Dropout层
@@ -117,14 +117,14 @@ class GIN(torch.nn.Module):
         # 不能将scatter_mean放入Sequential中，因为它不是Module子类
         self.global_pool_linear = torch.nn.Sequential(
             torch.nn.Linear(hidden_dim, out_dim),
-            torch.nn.LayerNorm(out_dim),  # 替换为LayerNorm
+            torch.nn.LayerNorm(out_dim),
             torch.nn.ReLU()
         )
         
         # 输出层
         self.out_layer = torch.nn.Sequential(
             torch.nn.Linear(out_dim, out_dim),
-            torch.nn.LayerNorm(out_dim),  # 替换为LayerNorm
+            torch.nn.LayerNorm(out_dim),
             torch.nn.ReLU()
         )
 
@@ -140,15 +140,22 @@ class GIN(torch.nn.Module):
         # 边特征嵌入
         edge_attr = self.edge_embedding(edge_attr)
         
-        # 通过5层GIN卷积，每层后接Dropout
+        # 存储所有层的输出用于层间连接
+        layer_outputs = []
+        
+        # 通过GIN层
         for layer in self.gin_layers:
             x = layer(x, edge_index, edge_attr)
             x = torch.nn.functional.relu(x)
-            x = self.dropout(x)  # 添加Dropout提高泛化能力
+            x = self.dropout(x)
+            layer_outputs.append(x)
+        
+        # 使用层间连接：将所有层的输出相加
+        x = torch.stack(layer_outputs).sum(0)
         
         # 全局池化 - 确保输出256维特征
-        x = torch_scatter.scatter_mean(x, batch, dim=0)  # 直接应用scatter_mean
-        x = self.global_pool_linear(x)  # 应用线性层、LayerNorm和ReLU
+        x = torch_scatter.scatter_mean(x, batch, dim=0)
+        x = self.global_pool_linear(x)
         
         # 输出层
         return self.out_layer(x)
@@ -159,6 +166,7 @@ class GINLayer(torch.nn.Module):
     GIN卷积层实现，包含：
     - 节点和边特征的拼接和MLP处理
     - MLP（多层感知器）
+    - 残差连接
     - 可学习的epsilon参数
     """
     def __init__(self, in_dim, out_dim):
@@ -166,21 +174,30 @@ class GINLayer(torch.nn.Module):
         # 节点和边特征拼接后的MLP处理
         self.edge_node_mlp = torch.nn.Sequential(
             torch.nn.Linear(in_dim * 2, in_dim),  # 拼接后维度翻倍，再降回原维度
-            torch.nn.LayerNorm(in_dim),  # 替换为LayerNorm
+            torch.nn.LayerNorm(in_dim),
             torch.nn.ReLU()
         )
         
         # MLP结构
         self.mlp = torch.nn.Sequential(
-            torch.nn.Linear(in_dim, out_dim),  # 线性层
-            torch.nn.LayerNorm(out_dim),     # 替换为LayerNorm
-            torch.nn.ReLU(),                   # 激活函数
-            torch.nn.Linear(out_dim, out_dim)  # 线性层
+            torch.nn.Linear(in_dim, in_dim),  # 第一层保持维度不变
+            torch.nn.LayerNorm(in_dim),
+            torch.nn.ReLU(),
+            torch.nn.Linear(in_dim, out_dim)  # 最后一层可以改变维度
         )
+        
+        # 如果输入输出维度不同，添加投影层
+        self.projection = None
+        if in_dim != out_dim:
+            self.projection = torch.nn.Linear(in_dim, out_dim)
+        
         self.eps = torch.nn.Parameter(torch.Tensor([0]))  # 可学习的epsilon参数
 
     def forward(self, x, edge_index, edge_attr):
         """前向传播"""
+        # 保存输入用于残差连接
+        identity = x
+        
         row, col = edge_index  # 获取边的起点和终点
         x_j = x[row]  # 获取邻居节点特征
         
@@ -192,7 +209,14 @@ class GINLayer(torch.nn.Module):
         
         # 聚合邻居信息并更新节点特征
         out = (1 + self.eps) * x + torch_scatter.scatter_add(x_j, col, dim=0, dim_size=x.size(0))
-        return self.mlp(out)  # 通过MLP
+        out = self.mlp(out)
+        
+        # 应用残差连接
+        if self.projection is not None:
+            identity = self.projection(identity)
+        out = out + identity
+        
+        return out
 
 # 使用示例
 if __name__ == "__main__":
