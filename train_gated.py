@@ -13,6 +13,7 @@ import pickle
 
 from dataset import get_data_loaders
 from model_gated import DeepBindNetGated  # 导入门控版本的模型
+from lookahead import Lookahead  # 导入Lookahead优化器
 
 def parse_args():
     """解析命令行参数"""
@@ -25,13 +26,13 @@ def parse_args():
     # 模型参数
     parser.add_argument('--hidden_dim', type=int, default=256,
                         help='隐藏层维度')
-    parser.add_argument('--feature_dim', type=int, default=512,
+    parser.add_argument('--feature_dim', type=int, default=256,
                         help='特征维度')
     parser.add_argument('--fusion_heads', type=int, default=8,
                         help='融合模块注意力头数')
     parser.add_argument('--fusion_layers', type=int, default=4,
                         help='融合模块层数')
-    parser.add_argument('--dropout_rate', type=float, default=0.1,
+    parser.add_argument('--dropout_rate', type=float, default=0.3,
                         help='Dropout比率')
     parser.add_argument('--esm_model_path', type=str, default=None,
                         help='ESM预训练模型路径，如果为None则自动下载')
@@ -41,14 +42,20 @@ def parse_args():
                         help='批次大小')
     parser.add_argument('--num_epochs', type=int, default=200,
                         help='训练轮数')
-    parser.add_argument('--lr', type=float, default=1e-4,
+    parser.add_argument('--lr', type=float, default=0.0003,
                         help='初始学习率')
-    parser.add_argument('--weight_decay', type=float, default=0.001,
+    parser.add_argument('--weight_decay', type=float, default=0.008,
                         help='权重衰减')
     parser.add_argument('--patience', type=int, default=15,
                         help='早停耐心值')
     parser.add_argument('--num_workers', type=int, default=4,
                         help='数据加载线程数')
+    parser.add_argument('--lookahead_k', type=int, default=5,
+                        help='Lookahead优化器k步参数')
+    parser.add_argument('--lookahead_alpha', type=float, default=0.5,
+                        help='Lookahead优化器alpha参数')
+    parser.add_argument('--t_max', type=int, default=50,
+                        help='CosineAnnealingLR的T_max参数')
     
     # 其他参数
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu',
@@ -321,22 +328,25 @@ def main():
     # 定义损失函数
     criterion = nn.MSELoss()
     
-    # 定义优化器
-    optimizer = optim.AdamW(
+    # 定义优化器 (AdamW)
+    base_optimizer = optim.AdamW(
         model.parameters(),
         lr=args.lr,
         weight_decay=args.weight_decay
     )
     
-    # 定义学习率调度器
-    scheduler = optim.lr_scheduler.OneCycleLR(
-        optimizer,
-        max_lr=args.lr,
-        epochs=args.num_epochs,
-        steps_per_epoch=len(train_loader),
-        pct_start=0.3,
-        div_factor=25.0,
-        final_div_factor=1000.0
+    # 定义学习率调度器 (CosineAnnealingLR)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        base_optimizer,
+        T_max=args.t_max,
+        eta_min=1e-6
+    )
+    
+    # 包装为Lookahead优化器
+    optimizer = Lookahead(
+        base_optimizer,
+        k=args.lookahead_k,
+        alpha=args.lookahead_alpha
     )
     
     # 混合精度训练

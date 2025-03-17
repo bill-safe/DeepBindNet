@@ -55,22 +55,22 @@ class ResidualBlock1D(nn.Module):
 class ResNet1D(nn.Module):
     """
     一维残差网络，用于处理蛋白质序列特征
+    减少层数（4→3）以降低计算成本，提高训练稳定性
     """
-    def __init__(self, in_channels, hidden_dims=[64, 128, 256, 512], out_dim=256):
+    def __init__(self, in_channels, hidden_dims=[64, 128, 256], out_dim=384):
         super().__init__()
         # 输入卷积层
         self.conv1 = nn.Conv1d(in_channels, hidden_dims[0], kernel_size=3, stride=1, padding=1, bias=False)
         self.bn1 = nn.BatchNorm1d(hidden_dims[0])
         
-        # 残差层
+        # 残差层（减少到3层）
         self.layer1 = self._make_layer(hidden_dims[0], hidden_dims[0], stride=1)
         self.layer2 = self._make_layer(hidden_dims[0], hidden_dims[1], stride=2)
         self.layer3 = self._make_layer(hidden_dims[1], hidden_dims[2], stride=2)
-        self.layer4 = self._make_layer(hidden_dims[2], hidden_dims[3], stride=2)
         
         # 输出层
         self.avg_pool = nn.AdaptiveAvgPool1d(1)
-        self.fc = nn.Linear(hidden_dims[3], out_dim)
+        self.fc = nn.Linear(hidden_dims[2], out_dim)
         self.bn2 = nn.BatchNorm1d(out_dim)
     
     def _make_layer(self, in_channels, out_channels, stride):
@@ -85,11 +85,10 @@ class ResNet1D(nn.Module):
         # 输入卷积层
         x = F.relu(self.bn1(self.conv1(x)))
         
-        # 残差层
+        # 残差层（减少到3层）
         x = self.layer1(x)
         x = self.layer2(x)
         x = self.layer3(x)
-        x = self.layer4(x)
         
         # 全局平均池化
         x = self.avg_pool(x)
@@ -103,8 +102,9 @@ class ResNet1D(nn.Module):
 class ProteinFeatureExtractor(nn.Module):
     """
     蛋白质特征提取器，包含ESM预训练模型和ResNet1D
+    使用分步降维（1280→512→128→64）减少信息丢失
     """
-    def __init__(self, esm_model_path=None, esm_output_dim=1280, hidden_dims=[64, 128, 256, 512], out_dim=256):
+    def __init__(self, esm_model_path=None, esm_output_dim=1280, hidden_dims=[96, 192, 384], out_dim=384):
         super().__init__()
         # ESM模型
         self.esm_model_path = esm_model_path
@@ -147,10 +147,18 @@ class ProteinFeatureExtractor(nn.Module):
         self.esm_model = self.esm_model.eval()
         self.esm_batch_converter = self.esm_alphabet.get_batch_converter()
         
-        # 投影层，将ESM输出投影到ResNet输入
-        self.projection = nn.Linear(self.esm_output_dim, hidden_dims[0])
+        # 分步降维投影层（1280→512→128→64）
+        self.projection = nn.Sequential(
+            nn.Linear(self.esm_output_dim, 512),
+            nn.ReLU(),
+            nn.LayerNorm(512),  # 加入 LayerNorm，增强稳定性
+            nn.Linear(512, 256),
+            nn.ReLU(),
+            nn.LayerNorm(256),  # 加入 LayerNorm
+            nn.Linear(256, hidden_dims[0])
+        )
         
-        # ResNet1D
+        # ResNet1D（减少到3层）
         self.resnet = ResNet1D(
             in_channels=hidden_dims[0],
             hidden_dims=hidden_dims,

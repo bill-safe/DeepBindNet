@@ -80,16 +80,57 @@ class MolecularGraphProcessor:
         # 返回图数据对象
         return Data(x=node_features, edge_index=edge_index, edge_attr=edge_attr)
 
+# 残差GIN层实现
+class ResidualGINLayer(torch.nn.Module):
+    """
+    带有残差连接的GIN层，包含：
+    - GIN卷积层
+    - 残差连接
+    - BatchNorm1d防止梯度爆炸
+    """
+    def __init__(self, in_dim, out_dim):
+        super().__init__()
+        # GIN层
+        self.gin = GINLayer(in_dim, out_dim)
+        
+        # 如果输入输出维度不同，添加投影层
+        self.projection = None
+        if in_dim != out_dim:
+            self.projection = torch.nn.Linear(in_dim, out_dim)
+        
+        # BatchNorm1d防止梯度爆炸
+        self.bn = torch.nn.BatchNorm1d(out_dim)
+    
+    def forward(self, x, edge_index, edge_attr):
+        """前向传播"""
+        # 保存输入用于残差连接
+        identity = x
+        
+        # 通过GIN层
+        out = self.gin(x, edge_index, edge_attr)
+        
+        # 应用残差连接
+        if self.projection is not None:
+            identity = self.projection(identity)
+        out = out + identity
+        
+        # 应用BatchNorm1d
+        # 由于x的形状是[num_nodes, out_dim]，需要处理批次维度
+        # 这里假设节点已经按照batch索引排序
+        out = self.bn(out)
+        
+        return out
+
 # GIN图神经网络类
 class GIN(torch.nn.Module):
     """
     图神经网络模块，包含：
     - 节点/边特征嵌入层
-    - 8层GIN卷积，每层后接Dropout
-    - 全局池化层（输出256维特征）
+    - 5层残差GIN卷积，每层后接Dropout
+    - 全局池化层（输出384维特征）
     - 输出层
     """
-    def __init__(self, atom_feature_dim, bond_feature_dim, hidden_dim=128, out_dim=256, dropout_rate=0.2):
+    def __init__(self, atom_feature_dim, bond_feature_dim, hidden_dim=128, out_dim=384, dropout_rate=0.2):
         super().__init__()
         # 节点特征嵌入层
         self.node_embedding = torch.nn.Sequential(
@@ -105,9 +146,9 @@ class GIN(torch.nn.Module):
             torch.nn.ReLU()
         )
         
-        # 8层GIN卷积（增加层数）
+        # 5层残差GIN卷积（减少层数，添加残差连接）
         self.gin_layers = torch.nn.ModuleList([
-            GINLayer(hidden_dim, hidden_dim) for _ in range(8)
+            ResidualGINLayer(hidden_dim, hidden_dim) for _ in range(5)
         ])
         
         # Dropout层
@@ -116,9 +157,9 @@ class GIN(torch.nn.Module):
         # 全局池化层 - 使用全局平均池化确保输出固定维度
         # 不能将scatter_mean放入Sequential中，因为它不是Module子类
         self.global_pool_linear = torch.nn.Sequential(
-            torch.nn.Linear(hidden_dim, out_dim),
-            torch.nn.LayerNorm(out_dim),
-            torch.nn.ReLU()
+            torch.nn.Linear(hidden_dim, hidden_dim * 2),
+            torch.nn.ReLU(),
+            torch.nn.Linear(hidden_dim * 2, out_dim)
         )
         
         # 输出层
@@ -143,7 +184,7 @@ class GIN(torch.nn.Module):
         # 存储所有层的输出用于层间连接
         layer_outputs = []
         
-        # 通过GIN层
+        # 通过残差GIN层
         for layer in self.gin_layers:
             x = layer(x, edge_index, edge_attr)
             x = torch.nn.functional.relu(x)
@@ -153,7 +194,7 @@ class GIN(torch.nn.Module):
         # 使用层间连接：将所有层的输出相加
         x = torch.stack(layer_outputs).sum(0)
         
-        # 全局池化 - 确保输出256维特征
+        # 全局池化 - 确保输出384维特征
         x = torch_scatter.scatter_mean(x, batch, dim=0)
         x = self.global_pool_linear(x)
         

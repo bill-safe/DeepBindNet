@@ -11,20 +11,20 @@ class DeepBindNetGated(nn.Module):
     DeepBindNet模型的门控版本，用于预测蛋白质-小分子结合亲和力
     
     包含:
-    - 分子特征提取模块 (GIN)
-    - 蛋白质特征提取模块 (ESM + ResNet1D)
-    - 门控跨模态融合模块 (Gated Cross-Attention)
-    - 预测模块 (全连接层)
+    - 分子特征提取模块 (GIN)：5层残差GIN卷积，输出384维特征
+    - 蛋白质特征提取模块 (ESM + ResNet1D)：3层ResNet1D，输出384维特征
+    - 门控跨模态融合模块 (Gated Cross-Attention)：4层Transformer，优化的门控网络
+    - 预测模块 (全连接层)：增加Dropout到0.2，减少过拟合
     """
     def __init__(self, 
                  atom_feature_dim=6, 
                  bond_feature_dim=3,
                  hidden_dim=128,
-                 feature_dim=256,
+                 feature_dim=384,  # 更新为384维特征
                  esm_model_path=None,
                  esm_output_dim=1280,
                  fusion_heads=8,
-                 fusion_layers=2,
+                 fusion_layers=4,  # 增加到4层
                  dropout_rate=0.2,
                  scaler_params=None):
         super().__init__()
@@ -43,7 +43,7 @@ class DeepBindNetGated(nn.Module):
         self.protein_encoder = ProteinFeatureExtractor(
             esm_model_path=esm_model_path,
             esm_output_dim=esm_output_dim,
-            hidden_dims=[64, 128, 256, 512],
+            hidden_dims=[128, 192, 256],  # 减少到3层
             out_dim=feature_dim
         )
         
@@ -61,7 +61,7 @@ class DeepBindNetGated(nn.Module):
             nn.Linear(feature_dim, feature_dim // 2),
             nn.LayerNorm(feature_dim // 2),
             nn.ReLU(),
-            nn.Dropout(dropout_rate),
+            nn.Dropout(dropout_rate),  # 增加Dropout到0.2
             nn.Linear(feature_dim // 2, 1)
         )
 

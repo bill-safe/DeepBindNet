@@ -234,8 +234,13 @@ class GatedCrossAttention(nn.Module):
     通过门控机制动态调节原始特征与注意力特征的平衡：
     - 噪声数据下自动降低注意力权重（g→0）
     - 强相关特征时提升注意力贡献（g→1）
+    
+    优化点:
+    - 增加Transformer层数（2→4）增强特征融合能力
+    - 优化gate_net结构，减少计算量（1024→512）
+    - 增加梯度裁剪阈值，提高训练稳定性
     """
-    def __init__(self, embed_dim=256, num_heads=8, ff_dim=1024, num_layers=2, dropout=0.1, protein_dim=None, molecule_dim=None):
+    def __init__(self, embed_dim=384, num_heads=8, ff_dim=1024, num_layers=4, dropout=0.2, protein_dim=None, molecule_dim=None):
         super().__init__()
         self.embed_dim = embed_dim
         self.num_heads = num_heads
@@ -249,18 +254,18 @@ class GatedCrossAttention(nn.Module):
         if molecule_dim is not None and molecule_dim != embed_dim:
             self.molecule_projection = nn.Linear(molecule_dim, embed_dim)
         
-        # 跨模态注意力层
+        # 跨模态注意力层（增加到4层）
         self.cross_attn_layers = nn.ModuleList([
             TransformerEncoderLayer(embed_dim, num_heads, ff_dim, dropout)
             for _ in range(num_layers)
         ])
         
-        # 门控网络
+        # 门控网络（优化结构，减少计算量）
         self.gate_net = nn.Sequential(
-            nn.Linear(embed_dim * 2, 1024),
+            nn.Linear(embed_dim * 2, 512),
             nn.ReLU(),
-            nn.BatchNorm1d(1024),
-            nn.Linear(1024, 1),
+            nn.BatchNorm1d(512),
+            nn.Linear(512, 1),
             nn.Sigmoid()
         )
         
@@ -271,8 +276,8 @@ class GatedCrossAttention(nn.Module):
             nn.ReLU()
         )
         
-        # 梯度裁剪阈值
-        self.grad_clip_threshold = 2.0
+        # 梯度裁剪阈值（增加到2.5提高稳定性）
+        self.grad_clip_threshold = 2.5
     
     def forward(self, protein_features, molecule_features):
         """
